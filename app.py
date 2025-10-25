@@ -4,12 +4,13 @@ from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
 import requests
+import traceback
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)  # ✅ Fixes "Network Error" from frontend (allows cross-origin requests)
+CORS(app)  # ✅ Enables cross-origin requests from frontend
 
 # Supabase setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -19,9 +20,11 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # n8n webhook URL
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
 
+
 @app.route('/submit', methods=['POST'])
 def submit_data():
     try:
+        # 🧩 Collect form fields
         name = request.form.get('name')
         email = request.form.get('email', None)
         phone = request.form.get('phone', None)
@@ -35,17 +38,17 @@ def submit_data():
         if not file:
             return jsonify({"error": "Resume file required"}), 400
 
-        # ✅ Upload file to Supabase Storage
+        # 🧩 Upload resume to Supabase Storage
         file_path = f"{email or name}_{file.filename}"
         supabase.storage.from_('resumes').upload(file_path, file)
         file_url = f"{SUPABASE_URL}/storage/v1/object/public/resumes/{file_path}"
 
-        # ✅ Insert user info
+        # 🧩 Insert user
         user_data = {"name": name, "email": email, "phone": phone}
         user = supabase.table("users").insert(user_data).execute()
         user_id = user.data[0]["id"]
 
-        # ✅ Insert preferences
+        # 🧩 Insert preferences
         pref_data = {
             "user_id": user_id,
             "job_title": job_title,
@@ -56,11 +59,11 @@ def submit_data():
         }
         supabase.table("preferences").insert(pref_data).execute()
 
-        # ✅ Insert resume record
+        # 🧩 Insert resume record
         resume_data = {"user_id": user_id, "file_url": file_url}
         supabase.table("resumes").insert(resume_data).execute()
 
-        # ✅ Trigger n8n workflow
+        # 🧩 Trigger n8n webhook
         payload = {
             "user_id": user_id,
             "email": email,
@@ -74,7 +77,8 @@ def submit_data():
         return jsonify({"message": "Data submitted successfully!"}), 200
 
     except Exception as e:
-        print("Error:", e)
+        print("❌ ERROR in /submit:")
+        print(traceback.format_exc())   # ✅ Full error trace will show in Render logs
         return jsonify({"error": str(e)}), 500
 
 
