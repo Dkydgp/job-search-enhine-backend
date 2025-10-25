@@ -52,12 +52,18 @@ def submit_data():
             return jsonify({"error": "Resume file required"}), 400
 
         # ----------------------------------------------------------
-        # ✅ Upload to Supabase Storage (unique filename + upsert)
+        # ✅ Upload to Supabase Storage (handles duplicates safely)
         # ----------------------------------------------------------
         file_path = f"{email or name}_{int(time.time())}_{file.filename}"
         logging.info(f"Uploading file to Supabase path: {file_path}")
         file_bytes = file.read()
-        supabase.storage.from_("resumes").upload(file_path, file_bytes, {"upsert": True})
+
+        try:
+            supabase.storage.from_("resumes").upload(file_path, file_bytes)
+        except Exception as upload_error:
+            logging.warning(f"File may already exist, trying update(): {upload_error}")
+            supabase.storage.from_("resumes").update(file_path, file_bytes)
+
         file_url = f"{SUPABASE_URL}/storage/v1/object/public/resumes/{file_path}"
 
         # ----------------------------------------------------------
