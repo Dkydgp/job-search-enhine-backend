@@ -9,7 +9,7 @@ import logging
 import sys
 
 # ----------------------------------------------------------
-# Logging setup (forces detailed output to Render console)
+# Logging setup
 # ----------------------------------------------------------
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
@@ -19,17 +19,15 @@ logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)  # allow cross-origin requests from frontend
+CORS(app)  # ✅ Allow requests from your frontend
 
 # ----------------------------------------------------------
-# Supabase + n8n setup
+# Supabase & n8n setup
 # ----------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
-
 
 # ----------------------------------------------------------
 # Routes
@@ -37,7 +35,7 @@ N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
 @app.route("/submit", methods=["POST"])
 def submit_data():
     try:
-        # Collect form data
+        # 🧩 Collect form data
         name = request.form.get("name")
         email = request.form.get("email", None)
         phone = request.form.get("phone", None)
@@ -52,15 +50,16 @@ def submit_data():
             return jsonify({"error": "Resume file required"}), 400
 
         # ----------------------------------------------------------
-        # Upload to Supabase Storage
+        # ✅ FIXED: Upload to Supabase Storage (read bytes)
         # ----------------------------------------------------------
         file_path = f"{email or name}_{file.filename}"
         logging.debug(f"Uploading file to Supabase path: {file_path}")
-        supabase.storage.from_("resumes").upload(file_path, file)
+        file_bytes = file.read()  # Convert FileStorage → bytes
+        supabase.storage.from_("resumes").upload(file_path, file_bytes)
         file_url = f"{SUPABASE_URL}/storage/v1/object/public/resumes/{file_path}"
 
         # ----------------------------------------------------------
-        # Insert data into Supabase tables
+        # Insert into Supabase tables
         # ----------------------------------------------------------
         user_data = {"name": name, "email": email, "phone": phone}
         user = supabase.table("users").insert(user_data).execute()
@@ -96,7 +95,7 @@ def submit_data():
 
     except Exception as e:
         logging.error("❌ ERROR in /submit:")
-        traceback.print_exc()  # show full error trace in Render logs
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -106,7 +105,7 @@ def home():
 
 
 # ----------------------------------------------------------
-# Run Flask with DEBUG mode (shows all errors in Render logs)
+# Run Flask with debug for detailed logs (Render safe)
 # ----------------------------------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000, debug=True)
