@@ -7,11 +7,12 @@ import requests
 import traceback
 import logging
 import sys
+import time
 
 # ----------------------------------------------------------
-# Logging setup
+# Logging setup for Render
 # ----------------------------------------------------------
-logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
 # ----------------------------------------------------------
 # Load environment variables
@@ -19,15 +20,16 @@ logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)  # ✅ Allow requests from your frontend
+CORS(app)  # ✅ allow cross-origin requests from frontend
 
 # ----------------------------------------------------------
 # Supabase & n8n setup
 # ----------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ----------------------------------------------------------
 # Routes
@@ -50,21 +52,26 @@ def submit_data():
             return jsonify({"error": "Resume file required"}), 400
 
         # ----------------------------------------------------------
-        # ✅ FIXED: Upload to Supabase Storage (read bytes)
+        # ✅ Upload to Supabase Storage (unique filename + upsert)
         # ----------------------------------------------------------
-        file_path = f"{email or name}_{file.filename}"
-        logging.debug(f"Uploading file to Supabase path: {file_path}")
-        file_bytes = file.read()  # Convert FileStorage → bytes
-        supabase.storage.from_("resumes").upload(file_path, file_bytes)
+        file_path = f"{email or name}_{int(time.time())}_{file.filename}"
+        logging.info(f"Uploading file to Supabase path: {file_path}")
+        file_bytes = file.read()
+        supabase.storage.from_("resumes").upload(file_path, file_bytes, {"upsert": True})
         file_url = f"{SUPABASE_URL}/storage/v1/object/public/resumes/{file_path}"
 
         # ----------------------------------------------------------
-        # Insert into Supabase tables
+        # ✅ Insert into Users table
         # ----------------------------------------------------------
         user_data = {"name": name, "email": email, "phone": phone}
         user = supabase.table("users").insert(user_data).execute()
+        if not user.data:
+            raise Exception("User insert failed")
         user_id = user.data[0]["id"]
 
+        # ----------------------------------------------------------
+        # ✅ Insert into Preferences table
+        # ----------------------------------------------------------
         pref_data = {
             "user_id": user_id,
             "job_title": job_title,
@@ -75,11 +82,14 @@ def submit_data():
         }
         supabase.table("preferences").insert(pref_data).execute()
 
+        # ----------------------------------------------------------
+        # ✅ Insert into Resumes table
+        # ----------------------------------------------------------
         resume_data = {"user_id": user_id, "file_url": file_url}
         supabase.table("resumes").insert(resume_data).execute()
 
         # ----------------------------------------------------------
-        # Trigger n8n webhook
+        # ✅ Trigger n8n webhook (non-blocking)
         # ----------------------------------------------------------
         payload = {
             "user_id": user_id,
@@ -89,7 +99,10 @@ def submit_data():
             "skills": skills,
         }
         if N8N_WEBHOOK_URL:
-            requests.post(N8N_WEBHOOK_URL, json=payload)
+            try:
+                requests.post(N8N_WEBHOOK_URL, json=payload, timeout=3)
+            except Exception as e:
+                logging.warning(f"⚠️ n8n webhook failed: {e}")
 
         return jsonify({"message": "Data submitted successfully!"}), 200
 
@@ -101,11 +114,11 @@ def submit_data():
 
 @app.route("/")
 def home():
-    return "✅ Job Search Engine Backend Running!"
+    return "✅ Job Search Engine Backend Running on Render!"
 
 
 # ----------------------------------------------------------
-# Run Flask with debug for detailed logs (Render safe)
+# Run Flask for Render hosting
 # ----------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000, debug=True)
+    app.run(host="0.0.0.0", port=10000)
