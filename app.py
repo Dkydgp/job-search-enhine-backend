@@ -55,7 +55,7 @@ def submit_data():
         # ✅ Upload to Supabase Storage (handles duplicates safely)
         # ----------------------------------------------------------
         file_path = f"{email or name}_{int(time.time())}_{file.filename}"
-        logging.info(f"Uploading file to Supabase path: {file_path}")
+        logging.info(f"📁 Uploading file to Supabase path: {file_path}")
         file_bytes = file.read()
 
         try:
@@ -95,7 +95,7 @@ def submit_data():
         supabase.table("resumes").insert(resume_data).execute()
 
         # ----------------------------------------------------------
-        # ✅ Trigger n8n webhook (non-blocking)
+        # ✅ Trigger n8n webhook (non-blocking, with logging)
         # ----------------------------------------------------------
         payload = {
             "user_id": user_id,
@@ -104,9 +104,14 @@ def submit_data():
             "location": location,
             "skills": skills,
         }
+
         if N8N_WEBHOOK_URL:
             try:
-                requests.post(N8N_WEBHOOK_URL, json=payload, timeout=3)
+                logging.info(f"📡 Sending payload to n8n webhook: {payload}")
+                response = requests.post(N8N_WEBHOOK_URL, json=payload, timeout=10)
+                logging.info(f"✅ n8n webhook response status: {response.status_code}")
+            except requests.exceptions.Timeout:
+                logging.warning("⚠️ n8n webhook request timed out (check network or workflow).")
             except Exception as e:
                 logging.warning(f"⚠️ n8n webhook failed: {e}")
 
