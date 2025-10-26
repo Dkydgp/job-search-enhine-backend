@@ -13,9 +13,12 @@ from flask_cors import CORS
 # 🔧 Flask Setup
 # ---------------------------------------------------------
 app = Flask(__name__)
-CORS(app)  # enable cross-origin access
+CORS(app)  # allow frontend/webapp POSTs
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
@@ -38,14 +41,15 @@ def home():
         "message": "🚀 Job Search Engine Backend is Running!"
     }), 200
 
+
 # ---------------------------------------------------------
-# 📨 Submit Route (Handles Supabase + n8n)
+# 📨 Submit Route
 # ---------------------------------------------------------
 @app.route("/submit", methods=["POST"])
 def submit_data():
     try:
         # -------------------------------------------------
-        # 📥 1. Handle both JSON and Form Data
+        # 📥 1. Accept JSON or Form data
         # -------------------------------------------------
         if request.is_json:
             data = request.get_json()
@@ -54,39 +58,56 @@ def submit_data():
 
         logger.info(f"📥 Received data: {data}")
 
-        # Extract data fields (with fallbacks)
+        # Extract safely
         name = data.get("name", "Unknown")
         email = data.get("email")
         job_title = data.get("job_title", "")
         location = data.get("location", "")
         skills = data.get("skills", "")
-        file_path = data.get("file_path", "N/A")
+        file_path = data.get("file_path") or data.get("file_url") or "unknown_file"
+
+        if not email:
+            return jsonify({"status": "error", "message": "Email is required"}), 400
 
         # -------------------------------------------------
-        # 💾 2. Save to Supabase
+        # 💾 2. Insert into Supabase Tables (Safe & Structured)
         # -------------------------------------------------
-        # ✅ Fix: include name in user upsert (avoids NOT NULL violation)
-        supabase.table("users").upsert(
-            {"email": email, "name": name},
-            on_conflict="email"
-        ).execute()
+        # ---- USERS ----
+        try:
+            supabase.table("users").upsert(
+                {"email": email, "name": name},
+                on_conflict="email"
+            ).execute()
+            logger.info("✅ User record inserted/updated.")
+        except Exception as user_error:
+            logger.warning(f"⚠️ Skipped inserting into users: {user_error}")
 
-        # Insert preferences
-        supabase.table("preferences").insert({
-            "email": email,
-            "job_title": job_title,
-            "location": location,
-            "skills": skills
-        }).execute()
+        # ---- PREFERENCES ----
+        try:
+            supabase.table("preferences").insert({
+                "email": email,
+                "job_title": job_title,
+                "location": location,
+                "skills": skills
+            }).execute()
+            logger.info("✅ Preferences record inserted.")
+        except Exception as pref_error:
+            logger.warning(f"⚠️ Skipped inserting into preferences: {pref_error}")
 
-        # Insert resume info
-        supabase.table("resumes").insert({
-            "email": email,
-            "file_path": file_path
-        }).execute()
+        # ---- RESUMES ----
+        try:
+            # Match Supabase schema: file_url must exist
+            safe_file_url = file_path if file_path.strip() else "unknown_file"
+            supabase.table("resumes").insert({
+                "email": email,
+                "file_url": safe_file_url
+            }).execute()
+            logger.info("✅ Resume record inserted.")
+        except Exception as resume_error:
+            logger.warning(f"⚠️ Skipped inserting into resumes: {resume_error}")
 
         # -------------------------------------------------
-        # 🌐 3. Send to n8n Webhook (jobsearch)
+        # 🌐 3. Send Payload to n8n Webhook (jobsearch)
         # -------------------------------------------------
         payload = {
             "user_id": data.get("user_id"),
@@ -101,15 +122,14 @@ def submit_data():
 
         logger.info(f"📡 Sending payload to n8n webhook ({N8N_WEBHOOK_URL}): {payload}")
         n8n_response = requests.post(N8N_WEBHOOK_URL, json=payload, headers=headers, timeout=10)
-
         logger.info(f"✅ n8n webhook response: {n8n_response.status_code} | {n8n_response.text}")
 
         # -------------------------------------------------
-        # ✅ 4. Return Success Response
+        # ✅ 4. Send Response to Frontend
         # -------------------------------------------------
         result = {
             "status": "success",
-            "message": "Data sent to n8n webhook (jobsearch) successfully!",
+            "message": "Data processed and sent successfully!",
             "n8n_status": n8n_response.status_code,
             "n8n_response": n8n_response.text
         }
@@ -126,6 +146,7 @@ def submit_data():
         }), 500)
         error_response.headers["Content-Type"] = "application/json"
         return error_response
+
 
 # ---------------------------------------------------------
 # 🚀 Flask Entry Point (Render Compatible)
