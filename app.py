@@ -1,135 +1,92 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask import Flask, request, jsonify, make_response
+import requests
+import logging
 from supabase import create_client, Client
 import os
-from dotenv import load_dotenv
-import requests
-import traceback
-import logging
-import sys
-import time
-
-# ----------------------------------------------------------
-# Logging setup for Render
-# ----------------------------------------------------------
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-
-# ----------------------------------------------------------
-# Load environment variables
-# ----------------------------------------------------------
-load_dotenv()
 
 app = Flask(__name__)
-CORS(app)  # ✅ allow cross-origin requests from frontend
 
-# ----------------------------------------------------------
-# Supabase & n8n setup
-# ----------------------------------------------------------
+# ---------------------------------------------------------
+# ✅ Setup
+# ---------------------------------------------------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL")
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ----------------------------------------------------------
-# Routes
-# ----------------------------------------------------------
+N8N_WEBHOOK_URL = "https://YOUR-N8N-DOMAIN/webhook/job-ferch"  # <-- replace with your actual n8n Production URL
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------
+# ✅ Flask route
+# ---------------------------------------------------------
 @app.route("/submit", methods=["POST"])
 def submit_data():
     try:
-        # 🧩 Collect form data
-        name = request.form.get("name")
-        email = request.form.get("email", None)
-        phone = request.form.get("phone", None)
-        job_title = request.form.get("job_title")
-        skills = request.form.get("skills")
-        location = request.form.get("location")
-        salary = request.form.get("salary")
-        experience = request.form.get("experience")
-        file = request.files.get("resume")
+        data = request.get_json()
+        logger.info(f"📥 Received data: {data}")
 
-        if not file:
-            return jsonify({"error": "Resume file required"}), 400
-
-        # ----------------------------------------------------------
-        # ✅ Upload to Supabase Storage (handles duplicates safely)
-        # ----------------------------------------------------------
-        file_path = f"{email or name}_{int(time.time())}_{file.filename}"
-        logging.info(f"📁 Uploading file to Supabase path: {file_path}")
-        file_bytes = file.read()
-
-        try:
-            supabase.storage.from_("resumes").upload(file_path, file_bytes)
-        except Exception as upload_error:
-            logging.warning(f"File may already exist, trying update(): {upload_error}")
-            supabase.storage.from_("resumes").update(file_path, file_bytes)
-
-        file_url = f"{SUPABASE_URL}/storage/v1/object/public/resumes/{file_path}"
-
-        # ----------------------------------------------------------
-        # ✅ Insert into Users table
-        # ----------------------------------------------------------
-        user_data = {"name": name, "email": email, "phone": phone}
-        user = supabase.table("users").insert(user_data).execute()
-        if not user.data:
-            raise Exception("User insert failed")
-        user_id = user.data[0]["id"]
-
-        # ----------------------------------------------------------
-        # ✅ Insert into Preferences table
-        # ----------------------------------------------------------
-        pref_data = {
-            "user_id": user_id,
-            "job_title": job_title,
-            "skills": skills,
-            "location": location,
-            "salary_range": salary,
-            "experience": experience,
+        # -----------------------------------------------------
+        # 🧩 1. Insert/Upsert into Supabase (avoids duplicates)
+        # -----------------------------------------------------
+        user_data = {
+            "email": data.get("email"),
+            "name": data.get("name", "Unknown"),
         }
-        supabase.table("preferences").insert(pref_data).execute()
+        supabase.table("users").upsert(user_data, on_conflict="email").execute()
 
-        # ----------------------------------------------------------
-        # ✅ Insert into Resumes table
-        # ----------------------------------------------------------
-        resume_data = {"user_id": user_id, "file_url": file_url}
-        supabase.table("resumes").insert(resume_data).execute()
+        # Example: insert preferences and resumes
+        supabase.table("preferences").insert({
+            "email": data.get("email"),
+            "job_title": data.get("job_title"),
+            "location": data.get("location"),
+            "skills": data.get("skills"),
+        }).execute()
 
-        # ----------------------------------------------------------
-        # ✅ Trigger n8n webhook (non-blocking, with logging)
-        # ----------------------------------------------------------
+        supabase.table("resumes").insert({
+            "email": data.get("email"),
+            "file_path": data.get("file_path", "N/A")
+        }).execute()
+
+        # -----------------------------------------------------
+        # 🧠 2. Send payload to n8n webhook
+        # -----------------------------------------------------
         payload = {
-            "user_id": user_id,
-            "email": email,
-            "job_title": job_title,
-            "location": location,
-            "skills": skills,
+            "user_id": data.get("user_id"),
+            "email": data.get("email"),
+            "job_title": data.get("job_title"),
+            "location": data.get("location"),
+            "skills": data.get("skills"),
         }
 
-        if N8N_WEBHOOK_URL:
-            try:
-                logging.info(f"📡 Sending payload to n8n webhook: {payload}")
-                response = requests.post(N8N_WEBHOOK_URL, json=payload, timeout=10)
-                logging.info(f"✅ n8n webhook response status: {response.status_code}")
-            except requests.exceptions.Timeout:
-                logging.warning("⚠️ n8n webhook request timed out (check network or workflow).")
-            except Exception as e:
-                logging.warning(f"⚠️ n8n webhook failed: {e}")
+        headers = {
+            "Content-Type": "application/json",   # ✅ ensures proper content-type
+            "Authorization": "Bearer YOUR_SECRET_TOKEN"  # optional: use if your webhook requires auth
+        }
 
-        return jsonify({"message": "Data submitted successfully!"}), 200
+        logger.info(f"📡 Sending payload to n8n webhook: {payload}")
+        response = requests.post(N8N_WEBHOOK_URL, json=payload, headers=headers, timeout=10)
+        logger.info(f"✅ n8n webhook response: {response.status_code} | {response.text}")
+
+        # -----------------------------------------------------
+        # ✅ 3. Return a proper JSON response to frontend
+        # -----------------------------------------------------
+        result = {
+            "status": "success",
+            "n8n_status": response.status_code,
+            "message": "Data sent to n8n successfully!"
+        }
+
+        flask_response = make_response(jsonify(result), 200)
+        flask_response.headers["Content-Type"] = "application/json"   # ✅ explicit response header
+        return flask_response
 
     except Exception as e:
-        logging.error("❌ ERROR in /submit:")
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/")
-def home():
-    return "✅ Job Search Engine Backend Running on Render!"
-
-
-# ----------------------------------------------------------
-# Run Flask for Render hosting
-# ----------------------------------------------------------
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+        logger.error(f"❌ ERROR in /submit: {e}")
+        error_response = make_response(jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500)
+        error_response.headers["Content-Type"] = "application/json"
+        return error_response
