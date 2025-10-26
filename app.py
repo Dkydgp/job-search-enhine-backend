@@ -10,16 +10,12 @@ from supabase import create_client, Client
 from flask_cors import CORS
 
 # ---------------------------------------------------------
-# 🔧 Flask Configuration
+# 🔧 Flask Setup
 # ---------------------------------------------------------
 app = Flask(__name__)
-CORS(app)  # Allow cross-origin requests for web frontends
+CORS(app)  # enable cross-origin access
 
-# Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
@@ -29,7 +25,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "https://YOUR-N8N-DOMAIN/webhook/jobsearch")
 
-# Initialize Supabase
+# Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------------------------------------------------------
@@ -43,13 +39,13 @@ def home():
     }), 200
 
 # ---------------------------------------------------------
-# 📨 Submit Route
+# 📨 Submit Route (Handles Supabase + n8n)
 # ---------------------------------------------------------
 @app.route("/submit", methods=["POST"])
 def submit_data():
     try:
         # -------------------------------------------------
-        # 📥 1. Handle both JSON and Form submissions
+        # 📥 1. Handle both JSON and Form Data
         # -------------------------------------------------
         if request.is_json:
             data = request.get_json()
@@ -58,21 +54,22 @@ def submit_data():
 
         logger.info(f"📥 Received data: {data}")
 
-        # Validate basic required fields
+        # Extract data fields (with fallbacks)
+        name = data.get("name", "Unknown")
         email = data.get("email")
-        if not email:
-            return jsonify({"error": "Email is required"}), 400
-
         job_title = data.get("job_title", "")
         location = data.get("location", "")
         skills = data.get("skills", "")
         file_path = data.get("file_path", "N/A")
 
         # -------------------------------------------------
-        # 💾 2. Save data to Supabase
+        # 💾 2. Save to Supabase
         # -------------------------------------------------
-        # Upsert user (avoids duplicate email error)
-        supabase.table("users").upsert({"email": email}, on_conflict="email").execute()
+        # ✅ Fix: include name in user upsert (avoids NOT NULL violation)
+        supabase.table("users").upsert(
+            {"email": email, "name": name},
+            on_conflict="email"
+        ).execute()
 
         # Insert preferences
         supabase.table("preferences").insert({
@@ -82,26 +79,25 @@ def submit_data():
             "skills": skills
         }).execute()
 
-        # Insert resume record
+        # Insert resume info
         supabase.table("resumes").insert({
             "email": email,
             "file_path": file_path
         }).execute()
 
         # -------------------------------------------------
-        # 🌐 3. Send payload to n8n webhook (jobsearch)
+        # 🌐 3. Send to n8n Webhook (jobsearch)
         # -------------------------------------------------
         payload = {
             "user_id": data.get("user_id"),
             "email": email,
+            "name": name,
             "job_title": job_title,
             "location": location,
             "skills": skills
         }
 
-        headers = {
-            "Content-Type": "application/json"
-        }
+        headers = {"Content-Type": "application/json"}
 
         logger.info(f"📡 Sending payload to n8n webhook ({N8N_WEBHOOK_URL}): {payload}")
         n8n_response = requests.post(N8N_WEBHOOK_URL, json=payload, headers=headers, timeout=10)
@@ -109,7 +105,7 @@ def submit_data():
         logger.info(f"✅ n8n webhook response: {n8n_response.status_code} | {n8n_response.text}")
 
         # -------------------------------------------------
-        # ✅ 4. Return success response to frontend
+        # ✅ 4. Return Success Response
         # -------------------------------------------------
         result = {
             "status": "success",
