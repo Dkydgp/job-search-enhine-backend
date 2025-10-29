@@ -1,5 +1,7 @@
+# Job Khojo Smart Backend Requirements
 flask
 flask-cors
+requests
 python-dotenv
 supabase
-requests
+PyMuPDF
