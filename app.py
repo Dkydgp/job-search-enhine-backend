@@ -17,11 +17,12 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 # Initialize Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Flask setup
 app = Flask(__name__)
 CORS(app)
 
 # -----------------------------
-# 🧩 Helper functions
+# 🧩 Helper Functions
 # -----------------------------
 def extract_text_from_pdf(path):
     """Extract text from PDF"""
@@ -44,12 +45,12 @@ def get_embedding(text):
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://jobkhojo.ai",  # optional
+            "HTTP-Referer": "https://jobkhojo.ai",
             "X-Title": "Job Khojo AI Backend"
         }
 
         payload = {
-            "model": "openai/text-embedding-3-small",  # default embedding model
+            "model": "openai/text-embedding-3-small",
             "input": text[:6000]
         }
 
@@ -69,7 +70,58 @@ def get_embedding(text):
 
 
 # -----------------------------
-# 📥 Upload resume + AI embedding
+# 🧾 Step 1: Save Personal Information
+# -----------------------------
+@app.route("/api/save_personal", methods=["POST"])
+def save_personal():
+    """Save Step 1: Personal info to Supabase"""
+    try:
+        data = request.get_json()
+        print("🧩 Received personal data:", data)
+
+        result = supabase.table("job_applicants").insert({
+            "full_name": data.get("full_name"),
+            "email": data.get("email"),
+            "phone": data.get("phone"),
+            "city": data.get("city"),
+            "state": data.get("state"),
+            "country": data.get("country")
+        }).execute()
+
+        user_id = result.data[0]["id"]
+        return jsonify({"status": "success", "user_id": user_id})
+    except Exception as e:
+        print("❌ Error saving personal info:", e)
+        return jsonify({"status": "error", "message": str(e)})
+
+
+# -----------------------------
+# 💼 Step 2: Save Job Preferences
+# -----------------------------
+@app.route("/api/save_preferences", methods=["POST"])
+def save_preferences():
+    """Save Step 2: Job preferences"""
+    try:
+        data = request.get_json()
+        user_id = data.get("user_id")
+
+        supabase.table("job_applicants").update({
+            "job_title": data.get("job_title"),
+            "job_type": data.get("job_type"),
+            "experience": data.get("experience"),
+            "salary": data.get("salary"),
+            "industry": data.get("industry"),
+            "relocate": data.get("relocate", "off")
+        }).eq("id", user_id).execute()
+
+        return jsonify({"status": "success"})
+    except Exception as e:
+        print("❌ Error saving preferences:", e)
+        return jsonify({"status": "error", "message": str(e)})
+
+
+# -----------------------------
+# 📤 Step 3: Upload Resume + Embedding
 # -----------------------------
 @app.route("/api/upload_resume", methods=["POST"])
 def upload_resume():
@@ -95,7 +147,6 @@ def upload_resume():
         resume.save(local_path)
 
         # Step 3 — Extract text
-        text = ""
         if resume.filename.lower().endswith(".pdf"):
             text = extract_text_from_pdf(local_path)
         elif resume.filename.lower().endswith(".docx"):
@@ -132,22 +183,17 @@ def upload_resume():
 
 
 # -----------------------------
-# 🧠 Match resumes with job description (AI)
+# 🧠 Step 4: Match Job Descriptions with Resumes
 # -----------------------------
 @app.route("/api/match_jobs", methods=["POST"])
 def match_jobs():
-    """
-    Input:
-      {"job_description": "Looking for data analyst skilled in Python and SQL"}
-    Output:
-      Top 5 matching resumes from resume_vectors
-    """
+    """Compare job description with resume embeddings."""
     try:
         job_desc = request.json.get("job_description")
         if not job_desc:
             return jsonify({"status": "error", "message": "Job description missing"}), 400
 
-        # 1️⃣ Create embedding using OpenRouter
+        # 1️⃣ Create embedding for job description
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json"
@@ -160,7 +206,7 @@ def match_jobs():
                                  headers=headers, json=payload)
         job_embedding = response.json()["data"][0]["embedding"]
 
-        # 2️⃣ Call Supabase match_resumes() SQL function
+        # 2️⃣ Call Supabase SQL function match_resumes()
         matches = supabase.rpc("match_resumes", {
             "query_embedding": job_embedding,
             "match_threshold": 0.7,
@@ -174,7 +220,7 @@ def match_jobs():
 
 
 # -----------------------------
-# 🩵 Health check
+# 🩵 Health Check
 # -----------------------------
 @app.route("/")
 def home():
