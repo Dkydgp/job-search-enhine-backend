@@ -4,13 +4,16 @@ from supabase import create_client, Client
 from openai import OpenAI
 from docx import Document
 import fitz, os, uuid
+from dotenv import load_dotenv
 
 # -----------------------------
-# 🔧 CONFIGURATION
+# ⚙️  Load environment variables
 # -----------------------------
-SUPABASE_URL = "https://YOUR-PROJECT-ID.supabase.co"
-SUPABASE_KEY = "YOUR-SERVICE-ROLE-KEY"
-OPENAI_API_KEY = "YOUR-OPENAI-API-KEY"
+load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
@@ -19,9 +22,10 @@ app = Flask(__name__)
 CORS(app)
 
 # -----------------------------
-# 🧩 HELPERS
+# 🧩 Helper functions
 # -----------------------------
 def extract_text_from_pdf(path):
+    """Extract text from PDF file"""
     text = ""
     with fitz.open(path) as pdf:
         for page in pdf:
@@ -29,14 +33,16 @@ def extract_text_from_pdf(path):
     return text
 
 def extract_text_from_docx(path):
+    """Extract text from DOCX file"""
     doc = Document(path)
     return "\n".join(p.text for p in doc.paragraphs)
 
 def get_embedding(text):
+    """Generate embeddings using OpenAI"""
     try:
         res = openai_client.embeddings.create(
             model="text-embedding-3-small",
-            input=text[:6000]
+            input=text[:6000]  # limit to avoid token overflow
         )
         return res.data[0].embedding
     except Exception as e:
@@ -44,57 +50,24 @@ def get_embedding(text):
         return None
 
 # -----------------------------
-# 🧩 STEP 1: Save Personal Info
+# 📥 Upload resume + AI embedding
 # -----------------------------
-@app.route("/api/save_personal", methods=["POST"])
-def save_personal():
-    data = request.json
+@app.route("/api/upload_resume", methods=["POST"])
+def upload_resume():
+    """
+    1️⃣ Upload resume to Supabase Storage
+    2️⃣ Extract text (PDF/DOCX)
+    3️⃣ Generate embeddings via OpenAI
+    4️⃣ Save in Supabase (resume_vectors table)
+    5️⃣ Update applicant record with resume_url
+    """
     try:
-        result = supabase.table("job_applicants").insert({
-            "full_name": data["full_name"],
-            "email": data["email"],
-            "phone": data["phone"],
-            "city": data["city"],
-            "state": data["state"],
-            "country": data["country"]
-        }).execute()
-        user_id = result.data[0]["id"]
-        return jsonify({"status": "success", "user_id": user_id})
-    except Exception as e:
-        print("❌ Error saving personal info:", e)
-        return jsonify({"status": "error", "message": str(e)})
-
-# -----------------------------
-# 🧩 STEP 2: Save Preferences
-# -----------------------------
-@app.route("/api/save_preferences", methods=["POST"])
-def save_preferences():
-    data = request.json
-    try:
-        supabase.table("job_applicants").update({
-            "job_title": data["job_title"],
-            "job_type": data["job_type"],
-            "experience": data["experience"],
-            "salary": data["salary"],
-            "industry": data["industry"],
-            "relocate": data["relocate"]
-        }).eq("id", data["user_id"]).execute()
-        return jsonify({"status": "success"})
-    except Exception as e:
-        print("❌ Error saving preferences:", e)
-        return jsonify({"status": "error", "message": str(e)})
-
-# -----------------------------
-# 🧩 STEP 3: Upload Resume + Create Embedding
-# -----------------------------
-@app.route("/api/finalize", methods=["POST"])
-def finalize():
-    try:
-        user_id = request.form["user_id"]
-        skills = request.form["skills"]
+        user_id = request.form.get("user_id")
         resume = request.files.get("resume")
+        if not resume:
+            return jsonify({"status": "error", "message": "No file uploaded"}), 400
 
-        # Upload resume to Supabase Storage
+        # Step 1 — Upload file to Supabase Storage
         resume_name = f"{user_id}_{uuid.uuid4().hex}_{resume.filename}"
         file_path = f"uploads/{resume_name}"
         bucket = "resumes"
@@ -102,28 +75,24 @@ def finalize():
         supabase.storage.from_(bucket).upload(file_path, resume.read())
         resume_url = supabase.storage.from_(bucket).get_public_url(file_path)
 
-        # Save locally for text extraction
+        # Step 2 — Save locally for text extraction
         os.makedirs("temp", exist_ok=True)
         local_path = os.path.join("temp", resume.filename)
         resume.save(local_path)
 
-        # Extract text from resume
+        # Step 3 — Extract text from resume
         text = ""
-        if resume.filename.endswith(".pdf"):
+        if resume.filename.lower().endswith(".pdf"):
             text = extract_text_from_pdf(local_path)
-        elif resume.filename.endswith(".docx"):
+        elif resume.filename.lower().endswith(".docx"):
             text = extract_text_from_docx(local_path)
+        else:
+            return jsonify({"status": "error", "message": "Unsupported file type"}), 400
 
-        # Generate embeddings
+        # Step 4 — Generate embedding
         embedding = get_embedding(text)
 
-        # Update main table
-        supabase.table("job_applicants").update({
-            "skills": skills,
-            "resume_url": resume_url
-        }).eq("id", user_id).execute()
-
-        # Save embedding into vector table
+        # Step 5 — Store embedding in Supabase
         if embedding:
             supabase.table("resume_vectors").insert({
                 "user_id": user_id,
@@ -131,37 +100,46 @@ def finalize():
                 "embedding": embedding
             }).execute()
 
+        # Step 6 — Update resume URL in job_applicants table
+        supabase.table("job_applicants").update({
+            "resume_url": resume_url
+        }).eq("id", user_id).execute()
+
         os.remove(local_path)
-        return jsonify({"status": "success", "resume_url": resume_url})
+        return jsonify({
+            "status": "success",
+            "resume_url": resume_url,
+            "message": "Resume uploaded and embedded successfully!"
+        })
 
     except Exception as e:
-        print("❌ Error in finalize:", e)
+        print("❌ Error:", e)
         return jsonify({"status": "error", "message": str(e)})
 
 # -----------------------------
-# 🧩 STEP 4: Match Jobs (AI Resume Matching)
+# 🧠 Match resumes with job description
 # -----------------------------
 @app.route("/api/match_jobs", methods=["POST"])
 def match_jobs():
     """
     Input:
-      {
-        "job_description": "Looking for data analyst skilled in Python, SQL, Power BI"
-      }
+      {"job_description": "Looking for data analyst skilled in Python and SQL"}
     Output:
-      Top 5 matching candidates from resume_vectors
+      Top 5 matching resumes from resume_vectors
     """
     try:
         job_desc = request.json.get("job_description")
+        if not job_desc:
+            return jsonify({"status": "error", "message": "Job description missing"}), 400
 
-        # Create embedding for job description
+        # 1️⃣ Create embedding for the job description
         res = openai_client.embeddings.create(
             model="text-embedding-3-small",
             input=job_desc
         )
         embedding = res.data[0].embedding
 
-        # Call match_resumes() function in Supabase
+        # 2️⃣ Call Supabase match_resumes() SQL function
         matches = supabase.rpc("match_resumes", {
             "query_embedding": embedding,
             "match_threshold": 0.7,
@@ -174,12 +152,15 @@ def match_jobs():
         return jsonify({"status": "error", "message": str(e)})
 
 # -----------------------------
-# 🩵 TEST ROUTE
+# 🩵 Health check
 # -----------------------------
 @app.route("/")
 def home():
     return "✅ Job Khojo AI Backend Running"
 
 # -----------------------------
+# 🚀 Run (Render-compatible)
+# -----------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
