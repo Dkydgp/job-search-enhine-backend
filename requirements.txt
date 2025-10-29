@@ -1,6 +1,7 @@
 flask
 flask-cors
 supabase
-openai
+requests
 PyMuPDF
 python-docx
+python-dotenv
