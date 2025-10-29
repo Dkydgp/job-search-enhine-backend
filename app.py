@@ -1,157 +1,90 @@
-# ---------------------------------------------------------
-# app.py — Flask + Supabase + n8n Webhook (jobsearch)
-# Render Deployment Ready
-# ---------------------------------------------------------
-import os
-import logging
-import requests
-from flask import Flask, request, jsonify, make_response
-from supabase import create_client, Client
+from flask import Flask, request, jsonify
 from flask_cors import CORS
+from dotenv import load_dotenv
+import os, datetime, tempfile, requests
 
-# ---------------------------------------------------------
-# 🔧 Flask Setup
-# ---------------------------------------------------------
+from utils.extract_resume import extract_text_from_resume, create_summary_prompt
+from utils.supabase_helper import upload_to_supabase, insert_to_db
+
+load_dotenv()
 app = Flask(__name__)
-CORS(app)  # allow frontend/webapp POSTs
+CORS(app)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------
-# 🌐 Environment Variables
-# ---------------------------------------------------------
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "https://YOUR-N8N-DOMAIN/webhook/jobsearch")
-
-# Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ---------------------------------------------------------
-# 🏠 Home Route
-# ---------------------------------------------------------
-@app.route("/", methods=["GET"])
-def home():
-    return jsonify({
-        "status": "ok",
-        "message": "🚀 Job Search Engine Backend is Running!"
-    }), 200
-
-
-# ---------------------------------------------------------
-# 📨 Submit Route
-# ---------------------------------------------------------
-@app.route("/submit", methods=["POST"])
-def submit_data():
+@app.route("/api/jobform", methods=["POST"])
+def receive_form():
     try:
-        # -------------------------------------------------
-        # 📥 1. Accept JSON or Form data
-        # -------------------------------------------------
-        if request.is_json:
-            data = request.get_json()
-        else:
-            data = request.form.to_dict()
+        # Collect form data
+        data = request.form.to_dict()
+        file = request.files.get("resume")
+        if not file:
+            return jsonify({"error": "Resume file missing"}), 400
 
-        logger.info(f"📥 Received data: {data}")
+        # Save resume temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            file.save(tmp.name)
+            resume_path = tmp.name
 
-        # Extract safely
-        name = data.get("name", "Unknown")
-        email = data.get("email")
-        job_title = data.get("job_title", "")
-        location = data.get("location", "")
-        skills = data.get("skills", "")
-        file_path = data.get("file_path") or data.get("file_url") or "unknown_file"
+        # Extract text + create summary prompt
+        resume_text = extract_text_from_resume(resume_path)
+        summary_prompt = create_summary_prompt(resume_text)
 
-        if not email:
-            return jsonify({"status": "error", "message": "Email is required"}), 400
+        # Generate auto filename with timestamp (acts as unique serial)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        safe_name = data.get("fullName", "User").replace(" ", "_")
+        resume_file_name = f"{timestamp}_{safe_name}_resume.pdf"
+        summary_file_name = f"{timestamp}_{safe_name}_summary.txt"
 
-        # -------------------------------------------------
-        # 💾 2. Insert into Supabase Tables (Safe & Structured)
-        # -------------------------------------------------
-        # ---- USERS ----
-        try:
-            supabase.table("users").upsert(
-                {"email": email, "name": name},
-                on_conflict="email"
-            ).execute()
-            logger.info("✅ User record inserted/updated.")
-        except Exception as user_error:
-            logger.warning(f"⚠️ Skipped inserting into users: {user_error}")
+        # Upload resume + summary to Supabase Storage
+        resume_url = upload_to_supabase(resume_path, "resumes", resume_file_name)
+        summary_path = tempfile.NamedTemporaryFile(delete=False, suffix=".txt").name
+        with open(summary_path, "w") as f:
+            f.write(summary_prompt)
+        summary_url = upload_to_supabase(summary_path, "prompt_summaries", summary_file_name)
 
-        # ---- PREFERENCES ----
-        try:
-            supabase.table("preferences").insert({
-                "email": email,
-                "job_title": job_title,
-                "location": location,
-                "skills": skills
-            }).execute()
-            logger.info("✅ Preferences record inserted.")
-        except Exception as pref_error:
-            logger.warning(f"⚠️ Skipped inserting into preferences: {pref_error}")
-
-        # ---- RESUMES ----
-        try:
-            # Match Supabase schema: file_url must exist
-            safe_file_url = file_path if file_path.strip() else "unknown_file"
-            supabase.table("resumes").insert({
-                "email": email,
-                "file_url": safe_file_url
-            }).execute()
-            logger.info("✅ Resume record inserted.")
-        except Exception as resume_error:
-            logger.warning(f"⚠️ Skipped inserting into resumes: {resume_error}")
-
-        # -------------------------------------------------
-        # 🌐 3. Send Payload to n8n Webhook (jobsearch)
-        # -------------------------------------------------
-        payload = {
-            "user_id": data.get("user_id"),
-            "email": email,
-            "name": name,
-            "job_title": job_title,
-            "location": location,
-            "skills": skills
+        # Prepare record
+        job_data = {
+            "full_name": data.get("fullName"),
+            "email": data.get("email"),
+            "phone": data.get("phone"),
+            "city": data.get("city"),
+            "state": data.get("state"),
+            "country": data.get("country"),
+            "job_title": data.get("jobTitle"),
+            "job_type": data.get("jobType"),
+            "experience": data.get("experience"),
+            "salary": data.get("salary"),
+            "industry": data.get("industry"),
+            "shift": data.get("shift"),
+            "relocate": data.get("relocate") == "on",
+            "skills": data.get("skills"),
+            "resume_url": resume_url,
+            "resume_text": resume_text,
+            "summary_prompt": summary_prompt,
+            "created_at": datetime.datetime.utcnow().isoformat()
         }
 
-        headers = {"Content-Type": "application/json"}
+        # Insert record in Supabase
+        record = insert_to_db(job_data)[0]
 
-        logger.info(f"📡 Sending payload to n8n webhook ({N8N_WEBHOOK_URL}): {payload}")
-        n8n_response = requests.post(N8N_WEBHOOK_URL, json=payload, headers=headers, timeout=10)
-        logger.info(f"✅ n8n webhook response: {n8n_response.status_code} | {n8n_response.text}")
+        # Optional: trigger n8n webhook for automation
+        # requests.post("https://n8n-yourworkflow.onrender.com/webhook/jobkhojo", json=record)
 
-        # -------------------------------------------------
-        # ✅ 4. Send Response to Frontend
-        # -------------------------------------------------
-        result = {
+        return jsonify({
             "status": "success",
-            "message": "Data processed and sent successfully!",
-            "n8n_status": n8n_response.status_code,
-            "n8n_response": n8n_response.text
-        }
-
-        flask_response = make_response(jsonify(result), 200)
-        flask_response.headers["Content-Type"] = "application/json"
-        return flask_response
+            "message": "Data stored successfully!",
+            "record_id": record["id"],
+            "resume_url": resume_url,
+            "summary_url": summary_url
+        }), 200
 
     except Exception as e:
-        logger.error(f"❌ ERROR in /submit: {e}")
-        error_response = make_response(jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500)
-        error_response.headers["Content-Type"] = "application/json"
-        return error_response
+        return jsonify({"error": str(e)}), 500
 
 
-# ---------------------------------------------------------
-# 🚀 Flask Entry Point (Render Compatible)
-# ---------------------------------------------------------
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"message": "✅ Job Khojo Smart Backend is running"})
+
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"🚀 Flask server running on port {port}")
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)
