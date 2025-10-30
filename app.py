@@ -74,7 +74,6 @@ def get_embedding(text):
 # -----------------------------
 @app.route("/api/save_personal", methods=["POST"])
 def save_personal():
-    """Save Step 1: Personal info to Supabase"""
     try:
         data = request.get_json()
         print("🧩 Received personal data:", data)
@@ -100,7 +99,6 @@ def save_personal():
 # -----------------------------
 @app.route("/api/save_preferences", methods=["POST"])
 def save_preferences():
-    """Save Step 2: Job preferences"""
     try:
         data = request.get_json()
         user_id = data.get("user_id")
@@ -125,7 +123,6 @@ def save_preferences():
 # -----------------------------
 @app.route("/api/upload_resume", methods=["POST"])
 def upload_resume():
-    """Uploads resume, extracts text, generates embeddings, and stores in Supabase."""
     try:
         user_id = request.form.get("user_id")
         resume = request.files.get("resume")
@@ -133,7 +130,6 @@ def upload_resume():
         if not resume:
             return jsonify({"status": "error", "message": "No file uploaded"}), 400
 
-        # Step 1 — Upload to Supabase Storage
         resume_name = f"{user_id}_{uuid.uuid4().hex}_{resume.filename}"
         file_path = f"uploads/{resume_name}"
         bucket = "resumes"
@@ -141,12 +137,10 @@ def upload_resume():
         supabase.storage.from_(bucket).upload(file_path, resume.read())
         resume_url = supabase.storage.from_(bucket).get_public_url(file_path)
 
-        # Step 2 — Save locally for text extraction
         os.makedirs("temp", exist_ok=True)
         local_path = os.path.join("temp", resume.filename)
         resume.save(local_path)
 
-        # Step 3 — Extract text
         if resume.filename.lower().endswith(".pdf"):
             text = extract_text_from_pdf(local_path)
         elif resume.filename.lower().endswith(".docx"):
@@ -154,10 +148,8 @@ def upload_resume():
         else:
             return jsonify({"status": "error", "message": "Unsupported file type"}), 400
 
-        # Step 4 — Generate embedding
         embedding = get_embedding(text)
 
-        # Step 5 — Save to Supabase
         if embedding:
             supabase.table("resume_vectors").insert({
                 "user_id": user_id,
@@ -165,7 +157,6 @@ def upload_resume():
                 "embedding": embedding
             }).execute()
 
-        # Step 6 — Update resume URL in job_applicants
         supabase.table("job_applicants").update({
             "resume_url": resume_url
         }).eq("id", user_id).execute()
@@ -187,13 +178,11 @@ def upload_resume():
 # -----------------------------
 @app.route("/api/match_jobs", methods=["POST"])
 def match_jobs():
-    """Compare job description with resume embeddings."""
     try:
         job_desc = request.json.get("job_description")
         if not job_desc:
             return jsonify({"status": "error", "message": "Job description missing"}), 400
 
-        # 1️⃣ Create embedding for job description
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json"
@@ -206,7 +195,6 @@ def match_jobs():
                                  headers=headers, json=payload)
         job_embedding = response.json()["data"][0]["embedding"]
 
-        # 2️⃣ Call Supabase SQL function match_resumes()
         matches = supabase.rpc("match_resumes", {
             "query_embedding": job_embedding,
             "match_threshold": 0.7,
@@ -216,6 +204,31 @@ def match_jobs():
         return jsonify({"status": "success", "matches": matches.data})
     except Exception as e:
         print("❌ Error in match_jobs:", e)
+        return jsonify({"status": "error", "message": str(e)})
+
+
+# -----------------------------
+# ✅ Step 5: Finalize Submission (NEW ROUTE)
+# -----------------------------
+@app.route("/api/finalize", methods=["POST"])
+def finalize():
+    """Finalize all steps and confirm completion."""
+    try:
+        data = request.get_json()
+        user_id = data.get("user_id")
+        print(f"🟦 Finalize called for user_id={user_id}")
+
+        # Example: mark user as 'completed'
+        supabase.table("job_applicants").update({
+            "status": "completed"
+        }).eq("id", user_id).execute()
+
+        # Optional: Trigger n8n webhook or any automation
+        # requests.post("https://your-n8n-url/webhook/finalize", json={"user_id": user_id})
+
+        return jsonify({"status": "success", "message": "Application finalized successfully!"})
+    except Exception as e:
+        print("❌ Error finalizing application:", e)
         return jsonify({"status": "error", "message": str(e)})
 
 
