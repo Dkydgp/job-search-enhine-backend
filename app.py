@@ -1,7 +1,7 @@
 # app.py
 import os
 import traceback
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from datetime import datetime
 from supabase import create_client, Client
@@ -12,22 +12,22 @@ UPLOAD_DIR = "/tmp/resumes"
 ALLOWED_EXTENSIONS = {"pdf", "docx", "doc"}
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024  # 8 MB
 
-# Supabase Configuration
+# Supabase Configuration (set in Render Environment Variables)
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# ---------- App init ----------
+# ---------- App Initialization ----------
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
-CORS(app, origins=["https://jobkhojo-frontend.onrender.com"])  # <-- Change to your frontend domain
+CORS(app, origins=["https://job-search-engine-frontend.onrender.com"])  # change to your actual frontend domain
 
-# Ensure upload dir exists
+# Ensure upload directory exists
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ---------- Helpers ----------
+# ---------- Helper Functions ----------
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -36,20 +36,20 @@ def log_exception(e: Exception):
     traceback.print_exc()
 
 def upload_to_supabase_storage(file_path: str, filename: str) -> str:
-    """Upload file to Supabase Storage and return public URL"""
+    """Upload file to Supabase Storage and return its public URL"""
     try:
         with open(file_path, 'rb') as f:
             file_data = f.read()
-        
+
         bucket_name = "resumes"
         storage_path = f"uploads/{filename}"
-        
+
         supabase.storage.from_(bucket_name).upload(
             storage_path,
             file_data,
             file_options={"content-type": "application/octet-stream"}
         )
-        
+
         public_url = supabase.storage.from_(bucket_name).get_public_url(storage_path)
         return public_url
     except Exception as e:
@@ -57,7 +57,7 @@ def upload_to_supabase_storage(file_path: str, filename: str) -> str:
         return None
 
 def insert_application(data: dict):
-    """Insert application data into Supabase database"""
+    """Insert a new job application record into Supabase"""
     try:
         result = supabase.table("job_applications").insert({
             "name": data["name"],
@@ -76,22 +76,38 @@ def insert_application(data: dict):
 
 # ---------- Routes ----------
 @app.route("/")
-def index():
-    return send_from_directory("static", "index.html")
+def home():
+    return """
+    <h2>✅ Job Search Engine Backend is Running!</h2>
+    <p>Available endpoints:</p>
+    <ul>
+      <li><b>GET /health</b> → Check backend health</li>
+      <li><b>POST /api/upload_resume</b> → Submit job application</li>
+    </ul>
+    """
+
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "upload_dir": UPLOAD_DIR,
+        "supabase_connected": SUPABASE_URL is not None
+    }), 200
 
 @app.route("/api/upload_resume", methods=["POST"])
 def upload_resume():
     try:
+        # Validate file presence
         if "resume" not in request.files:
-            return jsonify({"error": "No file part named 'resume' in the request"}), 400
+            return jsonify({"error": "Missing resume file"}), 400
 
         file = request.files["resume"]
         if file.filename == "":
-            return jsonify({"error": "No file was selected"}), 400
+            return jsonify({"error": "No file selected"}), 400
         if not allowed_file(file.filename):
-            return jsonify({"error": "Invalid file type. Allowed: pdf, docx, doc"}), 400
+            return jsonify({"error": "Invalid file type (only PDF, DOCX, DOC allowed)"}), 400
 
-        # Get form fields
+        # Collect form fields
         name = request.form.get("name", "").strip()
         age = request.form.get("age", "")
         qualification = request.form.get("qualification", "").strip()
@@ -100,16 +116,16 @@ def upload_resume():
         relocate = request.form.get("relocate", "false").lower() == "true"
 
         if not all([name, age, qualification, salary, industry]):
-            return jsonify({"error": "Missing required form fields"}), 400
+            return jsonify({"error": "Missing required fields"}), 400
 
         try:
             age = int(age)
             if age < 18 or age > 100:
                 return jsonify({"error": "Age must be between 18 and 100"}), 400
         except ValueError:
-            return jsonify({"error": "Invalid age value"}), 400
+            return jsonify({"error": "Invalid age format"}), 400
 
-        # Save file locally first
+        # Save file temporarily
         orig_filename = secure_filename(file.filename)
         timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
         filename = f"{timestamp}_{orig_filename}"
@@ -119,10 +135,10 @@ def upload_resume():
         # Upload to Supabase Storage
         resume_url = upload_to_supabase_storage(save_path, filename)
         if not resume_url:
-            return jsonify({"error": "Failed to upload file to Supabase storage"}), 500
+            return jsonify({"error": "Failed to upload file to Supabase"}), 500
 
         # Insert into DB
-        app_data = {
+        record = {
             "name": name,
             "age": age,
             "qualification": qualification,
@@ -132,11 +148,13 @@ def upload_resume():
             "resume_filename": filename,
             "resume_url": resume_url
         }
-        app_id = insert_application(app_data)
+        app_id = insert_application(record)
 
-        # Clean up local temp file
-        try: os.remove(save_path)
-        except: pass
+        # Cleanup temp file
+        try:
+            os.remove(save_path)
+        except:
+            pass
 
         return jsonify({
             "message": "Application submitted successfully",
@@ -148,13 +166,6 @@ def upload_resume():
         log_exception(e)
         return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "upload_dir": UPLOAD_DIR,
-        "supabase_connected": SUPABASE_URL is not None
-    }), 200
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
