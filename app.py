@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from supabase import create_client, Client
-import os, traceback
+import os, traceback, requests
 from dotenv import load_dotenv
 
 # -----------------------------
@@ -102,7 +102,7 @@ def save_preferences():
 
 
 # -----------------------------
-# 📎 STEP 2.5 – Upload Resume (Fixed Upload)
+# 📎 STEP 2.5 – Upload Resume (Direct Supabase REST API)
 # -----------------------------
 @app.route("/api/upload_resume", methods=["POST"])
 def upload_resume():
@@ -113,37 +113,40 @@ def upload_resume():
         if not file or not user_id:
             return jsonify({"status": "error", "message": "Missing file or user_id"}), 400
 
-        # ✅ Validate file extension
+        # ✅ Validate file type
         allowed_ext = {"pdf", "doc", "docx"}
         filename = file.filename
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         if ext not in allowed_ext:
             return jsonify({"status": "error", "message": "Invalid file type. Only PDF/DOC/DOCX allowed."}), 400
 
-        # ✅ Prepare unique filename and path
+        # ✅ Unique file path
         safe_name = f"{user_id}_{filename.replace(' ', '_')}"
         file_path = f"uploads/{safe_name}"
 
-        # ✅ Read file bytes for upload
-        file_bytes = file.read()
+        # ✅ Direct upload using Supabase REST API
+        storage_url = f"{SUPABASE_URL}/storage/v1/object/resumes/{file_path}"
+        headers = {
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": SUPABASE_KEY,
+            "Content-Type": "application/octet-stream",
+        }
 
-        # ✅ Upload to Supabase Storage bucket "resumes"
-        response = supabase.storage.from_("resumes").upload(
-            path=file_path,
-            file=file_bytes,
-            file_options={"content-type": "application/octet-stream"},
-        )
+        response = requests.post(storage_url, headers=headers, data=file.read())
 
-        # Check if upload failed
-        if hasattr(response, "error") and response.error is not None:
-            print("❌ Upload error:", response.error)
-            return jsonify({"status": "error", "message": str(response.error)}), 500
+        if response.status_code not in (200, 201):
+            print("❌ Upload failed:", response.text)
+            return jsonify({
+                "status": "error",
+                "message": f"Upload failed ({response.status_code})",
+                "details": response.text
+            }), 500
 
         # ✅ Generate public URL
-        resume_url = supabase.storage.from_("resumes").get_public_url(file_path)
+        resume_url = f"{SUPABASE_URL}/storage/v1/object/public/resumes/{file_path}"
         print(f"📎 Resume uploaded successfully for user_id={user_id}: {resume_url}")
 
-        # ✅ Save the resume URL in the database
+        # ✅ Save in database
         supabase.table("job_applicants").update({"resume_url": resume_url}).eq("id", user_id).execute()
 
         return jsonify({"status": "success", "resume_url": resume_url}), 200
