@@ -208,28 +208,55 @@ def match_jobs():
 
 
 # -----------------------------
-# ✅ Step 5: Finalize Submission (NEW ROUTE)
+# ✅ Step 5: Finalize Submission (Updated & Fixed)
 # -----------------------------
 @app.route("/api/finalize", methods=["POST"])
 def finalize():
-    """Finalize all steps and confirm completion."""
+    """Finalize application submission and mark user as completed."""
     try:
-        data = request.get_json()
-        user_id = data.get("user_id")
-        print(f"🟦 Finalize called for user_id={user_id}")
+        data = request.get_json(force=True)
+        print("🟦 Finalize called with:", data)
 
-        # Example: mark user as 'completed'
-        supabase.table("job_applicants").update({
+        user_id = data.get("user_id")
+        if not user_id:
+            print("⚠️ Missing user_id in finalize request")
+            return jsonify({
+                "status": "error",
+                "message": "Missing user_id in request."
+            }), 400
+
+        print(f"📦 Updating user_id={user_id} in Supabase...")
+        result = supabase.table("job_applicants").update({
             "status": "completed"
         }).eq("id", user_id).execute()
 
-        # Optional: Trigger n8n webhook or any automation
-        # requests.post("https://your-n8n-url/webhook/finalize", json={"user_id": user_id})
+        if not result.data:
+            print("⚠️ No matching record found in Supabase.")
+            return jsonify({
+                "status": "error",
+                "message": f"No record found for user_id {user_id}."
+            }), 404
 
-        return jsonify({"status": "success", "message": "Application finalized successfully!"})
+        print(f"✅ Finalized successfully for user_id={user_id}")
+
+        # Optional: trigger automation webhook
+        # try:
+        #     requests.post("https://n8n-your-webhook-url/webhook/finalize", json={"user_id": user_id})
+        # except Exception as webhook_err:
+        #     print("⚠️ n8n webhook failed:", webhook_err)
+
+        return jsonify({
+            "status": "success",
+            "message": "Application finalized successfully!",
+            "data": result.data
+        }), 200
+
     except Exception as e:
-        print("❌ Error finalizing application:", e)
-        return jsonify({"status": "error", "message": str(e)})
+        print("❌ Error finalizing application:", str(e))
+        return jsonify({
+            "status": "error",
+            "message": f"Failed to finalize application: {str(e)}"
+        }), 500
 
 
 # -----------------------------
