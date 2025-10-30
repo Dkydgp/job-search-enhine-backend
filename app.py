@@ -102,7 +102,7 @@ def save_preferences():
 
 
 # -----------------------------
-# 📎 STEP 2.5 – Upload Resume to Supabase Storage
+# 📎 STEP 2.5 – Upload Resume (Fixed Upload)
 # -----------------------------
 @app.route("/api/upload_resume", methods=["POST"])
 def upload_resume():
@@ -120,23 +120,30 @@ def upload_resume():
         if ext not in allowed_ext:
             return jsonify({"status": "error", "message": "Invalid file type. Only PDF/DOC/DOCX allowed."}), 400
 
-        # ✅ Prepare unique file name
+        # ✅ Prepare unique filename and path
         safe_name = f"{user_id}_{filename.replace(' ', '_')}"
         file_path = f"uploads/{safe_name}"
 
+        # ✅ Read file bytes for upload
+        file_bytes = file.read()
+
         # ✅ Upload to Supabase Storage bucket "resumes"
-        res = supabase.storage.from_("resumes").upload(file_path, file)
+        response = supabase.storage.from_("resumes").upload(
+            path=file_path,
+            file=file_bytes,
+            file_options={"content-type": "application/octet-stream"},
+        )
 
-        # ⚠️ Check for upload errors
-        if hasattr(res, "error") and res.error is not None:
-            print("❌ Upload error:", res.error)
-            return jsonify({"status": "error", "message": "Upload failed"}), 500
+        # Check if upload failed
+        if hasattr(response, "error") and response.error is not None:
+            print("❌ Upload error:", response.error)
+            return jsonify({"status": "error", "message": str(response.error)}), 500
 
-        # ✅ Get public URL
+        # ✅ Generate public URL
         resume_url = supabase.storage.from_("resumes").get_public_url(file_path)
-        print(f"📎 Resume uploaded for user_id={user_id}: {resume_url}")
+        print(f"📎 Resume uploaded successfully for user_id={user_id}: {resume_url}")
 
-        # ✅ Optionally save resume_url in database
+        # ✅ Save the resume URL in the database
         supabase.table("job_applicants").update({"resume_url": resume_url}).eq("id", user_id).execute()
 
         return jsonify({"status": "success", "resume_url": resume_url}), 200
