@@ -1,198 +1,77 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from supabase import create_client, Client
-import os, traceback, requests
-from dotenv import load_dotenv
+# app.py
+import os
+import traceback
+from flask import Flask, request, jsonify, send_from_directory
+from werkzeug.utils import secure_filename
+from datetime import datetime
 
-# -----------------------------
-# ⚙️ Load environment variables
-# -----------------------------
-load_dotenv()
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# ---------- Configuration ----------
+UPLOAD_DIR = "/tmp/resumes"  # use /tmp on Render to avoid deploy ephemeral problems
+ALLOWED_EXTENSIONS = {"pdf", "docx", "doc"}
+MAX_CONTENT_LENGTH = 8 * 1024 * 1024  # 8 MB max file size (adjust as needed)
 
-# -----------------------------
-# ⚙️ Setup Flask + Supabase
-# -----------------------------
+# ---------- App init ----------
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
-# ✅ Allow frontend domain (Render + localhost for testing)
-CORS(app, resources={r"/*": {"origins": [
-    "https://job-search-engine-frontend.onrender.com",
-    "http://localhost:5500",
-    "http://127.0.0.1:5500"
-]}})
+# ensure upload dir exists
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# ---------- Helpers ----------
+def allowed_file(filename: str) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# -----------------------------
-# 🧾 STEP 1 – Save Personal Info
-# -----------------------------
-@app.route("/api/save_personal", methods=["POST"])
-def save_personal():
-    try:
-        data = request.get_json(force=True)
-        print("🧩 Received personal data:", data)
+def log_exception(e: Exception):
+    # prints to stdout/stderr so Render logs it
+    print("❌ Exception:", str(e))
+    traceback.print_exc()
 
-        # Validate required fields
-        required = ["full_name", "email", "phone", "city", "state", "country"]
-        missing = [f for f in required if not data.get(f)]
-        if missing:
-            return jsonify({"status": "error", "message": f"Missing fields: {', '.join(missing)}"}), 400
+# ---------- Routes ----------
+@app.route("/")
+def index():
+    # simple static page if you want to test easily
+    return send_from_directory("static", "index.html")
 
-        # Step 1 — Insert record
-        result = supabase.table("job_applicants").insert({
-            "full_name": data["full_name"],
-            "email": data["email"],
-            "phone": data["phone"],
-            "city": data["city"],
-            "state": data["state"],
-            "country": data["country"]
-        }).execute()
-
-        print("🧾 Insert result:", getattr(result, "data", result))
-
-        # Step 2 — Retrieve the new user ID safely
-        lookup = supabase.table("job_applicants").select("id").eq("email", data["email"]).limit(1).execute()
-        print("🔍 Lookup result:", lookup.data)
-
-        if not lookup.data or len(lookup.data) == 0:
-            return jsonify({"status": "error", "message": "Insert succeeded but user not found"}), 500
-
-        user_id = str(lookup.data[0]["id"])
-        print(f"✅ User created successfully: ID={user_id}")
-
-        return jsonify({"status": "success", "user_id": user_id}), 200
-
-    except Exception as e:
-        print("❌ Error in save_personal:", e)
-        print(traceback.format_exc())
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# -----------------------------
-# 💼 STEP 2 – Save Job Preferences
-# -----------------------------
-@app.route("/api/save_preferences", methods=["POST"])
-def save_preferences():
-    try:
-        data = request.get_json(force=True)
-        user_id = data.get("user_id")
-
-        if not user_id:
-            return jsonify({"status": "error", "message": "Missing user_id"}), 400
-
-        supabase.table("job_applicants").update({
-            "job_title": data.get("job_title"),
-            "job_type": data.get("job_type"),
-            "experience": data.get("experience"),
-            "salary": data.get("salary"),
-            "industry": data.get("industry"),
-            "relocate": data.get("relocate", "off"),
-            "resume_url": data.get("resume_url")
-        }).eq("id", user_id).execute()
-
-        print(f"💾 Preferences saved for user_id={user_id}")
-        return jsonify({"status": "success"}), 200
-
-    except Exception as e:
-        print("❌ Error saving preferences:", e)
-        print(traceback.format_exc())
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# -----------------------------
-# 📎 STEP 2.5 – Upload Resume (Direct Supabase REST API)
-# -----------------------------
 @app.route("/api/upload_resume", methods=["POST"])
 def upload_resume():
     try:
-        file = request.files.get("file")
-        user_id = request.form.get("user_id")
+        # 1) check the file part exists in request
+        if "resume" not in request.files:
+            return jsonify({"error": "No file part named 'resume' in the request"}), 400
 
-        if not file or not user_id:
-            return jsonify({"status": "error", "message": "Missing file or user_id"}), 400
+        file = request.files["resume"]
 
-        # ✅ Validate file type
-        allowed_ext = {"pdf", "doc", "docx"}
-        filename = file.filename
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        if ext not in allowed_ext:
-            return jsonify({"status": "error", "message": "Invalid file type. Only PDF/DOC/DOCX allowed."}), 400
+        # 2) check file selected
+        if file.filename == "":
+            return jsonify({"error": "No file was selected"}), 400
 
-        # ✅ Unique file path
-        safe_name = f"{user_id}_{filename.replace(' ', '_')}"
-        file_path = f"uploads/{safe_name}"
+        # 3) validate extension
+        if not allowed_file(file.filename):
+            return jsonify({"error": "Invalid file type. Allowed: pdf, docx, doc"}), 400
 
-        # ✅ Direct upload using Supabase REST API
-        storage_url = f"{SUPABASE_URL}/storage/v1/object/resumes/{file_path}"
-        headers = {
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "apikey": SUPABASE_KEY,
-            "Content-Type": "application/octet-stream",
-        }
+        # 4) secure filename and add timestamp to avoid collisions
+        orig_filename = secure_filename(file.filename)
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        filename = f"{timestamp}_{orig_filename}"
+        save_path = os.path.join(UPLOAD_DIR, filename)
 
-        response = requests.post(storage_url, headers=headers, data=file.read())
+        # 5) save safely
+        file.save(save_path)
 
-        if response.status_code not in (200, 201):
-            print("❌ Upload failed:", response.text)
-            return jsonify({
-                "status": "error",
-                "message": f"Upload failed ({response.status_code})",
-                "details": response.text
-            }), 500
+        # Optional: push to external storage here (commented out below)
 
-        # ✅ Generate public URL
-        resume_url = f"{SUPABASE_URL}/storage/v1/object/public/resumes/{file_path}"
-        print(f"📎 Resume uploaded successfully for user_id={user_id}: {resume_url}")
-
-        # ✅ Save in database
-        supabase.table("job_applicants").update({"resume_url": resume_url}).eq("id", user_id).execute()
-
-        return jsonify({"status": "success", "resume_url": resume_url}), 200
+        # 6) respond success
+        return jsonify({"message": "Uploaded successfully", "filename": filename}), 200
 
     except Exception as e:
-        print("❌ Error uploading resume:", e)
-        print(traceback.format_exc())
-        return jsonify({"status": "error", "message": str(e)}), 500
+        log_exception(e)
+        return jsonify({"error": "Internal server error", "details": str(e)}), 500
 
+# ---------- Health check ----------
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok", "upload_dir": UPLOAD_DIR}), 200
 
-# -----------------------------
-# ✅ STEP 3 – Finalize Submission
-# -----------------------------
-@app.route("/api/finalize", methods=["POST"])
-def finalize():
-    try:
-        data = request.get_json(force=True)
-        user_id = data.get("user_id")
-
-        if not user_id:
-            return jsonify({"status": "error", "message": "Missing user_id"}), 400
-
-        supabase.table("job_applicants").update({
-            "status": "completed"
-        }).eq("id", user_id).execute()
-
-        print(f"✅ Finalized application for user_id={user_id}")
-        return jsonify({"status": "success", "message": "Application finalized"}), 200
-
-    except Exception as e:
-        print("❌ Error finalizing:", e)
-        print(traceback.format_exc())
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-# -----------------------------
-# 🩵 Health Check
-# -----------------------------
-@app.route("/")
-def home():
-    return "✅ Job Search Engine Backend Running on Render"
-
-
-# -----------------------------
-# 🚀 Render Entrypoint
-# -----------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # For local test
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
