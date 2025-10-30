@@ -16,7 +16,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 # -----------------------------
 app = Flask(__name__)
 
-# ✅ Allow your frontend domain (Render + localhost for testing)
+# ✅ Allow frontend domain (Render + localhost for testing)
 CORS(app, resources={r"/*": {"origins": [
     "https://job-search-engine-frontend.onrender.com",
     "http://localhost:5500",
@@ -34,20 +34,34 @@ def save_personal():
         data = request.get_json(force=True)
         print("🧩 Received personal data:", data)
 
+        # Validate required fields
+        required = ["full_name", "email", "phone", "city", "state", "country"]
+        missing = [f for f in required if not data.get(f)]
+        if missing:
+            return jsonify({"status": "error", "message": f"Missing fields: {', '.join(missing)}"}), 400
+
+        # Step 1 — Insert record (avoid .select() to prevent selvt bug)
         result = supabase.table("job_applicants").insert({
-            "full_name": data.get("full_name"),
-            "email": data.get("email"),
-            "phone": data.get("phone"),
-            "city": data.get("city"),
-            "state": data.get("state"),
-            "country": data.get("country")
-        }).select("*").execute()
+            "full_name": data["full_name"],
+            "email": data["email"],
+            "phone": data["phone"],
+            "city": data["city"],
+            "state": data["state"],
+            "country": data["country"]
+        }).execute()
 
-        print("🧾 Supabase insert result:", result.data)
-        if not result.data:
-            return jsonify({"status": "error", "message": "Insert returned no data"}), 500
+        print("🧾 Insert result:", getattr(result, "data", result))
 
-        user_id = str(result.data[0]["id"])
+        # Step 2 — Retrieve the new user ID safely (fallback lookup)
+        lookup = supabase.table("job_applicants").select("id").eq("email", data["email"]).limit(1).execute()
+        print("🔍 Lookup result:", lookup.data)
+
+        if not lookup.data or len(lookup.data) == 0:
+            return jsonify({"status": "error", "message": "Insert succeeded but user not found"}), 500
+
+        user_id = str(lookup.data[0]["id"])
+        print(f"✅ User created successfully: ID={user_id}")
+
         return jsonify({"status": "success", "user_id": user_id}), 200
 
     except Exception as e:
@@ -57,7 +71,7 @@ def save_personal():
 
 
 # -----------------------------
-# 💼 STEP 2 – Save Preferences
+# 💼 STEP 2 – Save Job Preferences
 # -----------------------------
 @app.route("/api/save_preferences", methods=["POST"])
 def save_preferences():
@@ -77,7 +91,7 @@ def save_preferences():
             "relocate": data.get("relocate", "off")
         }).eq("id", user_id).execute()
 
-        print("💾 Preferences saved for user_id:", user_id)
+        print(f"💾 Preferences saved for user_id={user_id}")
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
@@ -87,7 +101,7 @@ def save_preferences():
 
 
 # -----------------------------
-# ✅ STEP 3 – Finalize
+# ✅ STEP 3 – Finalize Submission
 # -----------------------------
 @app.route("/api/finalize", methods=["POST"])
 def finalize():
@@ -102,7 +116,7 @@ def finalize():
             "status": "completed"
         }).eq("id", user_id).execute()
 
-        print(f"✅ Finalized for user_id={user_id}")
+        print(f"✅ Finalized application for user_id={user_id}")
         return jsonify({"status": "success", "message": "Application finalized"}), 200
 
     except Exception as e:
