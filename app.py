@@ -40,7 +40,7 @@ def save_personal():
         if missing:
             return jsonify({"status": "error", "message": f"Missing fields: {', '.join(missing)}"}), 400
 
-        # Step 1 — Insert record (avoid .select() to prevent selvt bug)
+        # Step 1 — Insert record
         result = supabase.table("job_applicants").insert({
             "full_name": data["full_name"],
             "email": data["email"],
@@ -52,7 +52,7 @@ def save_personal():
 
         print("🧾 Insert result:", getattr(result, "data", result))
 
-        # Step 2 — Retrieve the new user ID safely (fallback lookup)
+        # Step 2 — Retrieve the new user ID safely
         lookup = supabase.table("job_applicants").select("id").eq("email", data["email"]).limit(1).execute()
         print("🔍 Lookup result:", lookup.data)
 
@@ -88,7 +88,8 @@ def save_preferences():
             "experience": data.get("experience"),
             "salary": data.get("salary"),
             "industry": data.get("industry"),
-            "relocate": data.get("relocate", "off")
+            "relocate": data.get("relocate", "off"),
+            "resume_url": data.get("resume_url")
         }).eq("id", user_id).execute()
 
         print(f"💾 Preferences saved for user_id={user_id}")
@@ -96,6 +97,52 @@ def save_preferences():
 
     except Exception as e:
         print("❌ Error saving preferences:", e)
+        print(traceback.format_exc())
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# -----------------------------
+# 📎 STEP 2.5 – Upload Resume to Supabase Storage
+# -----------------------------
+@app.route("/api/upload_resume", methods=["POST"])
+def upload_resume():
+    try:
+        file = request.files.get("file")
+        user_id = request.form.get("user_id")
+
+        if not file or not user_id:
+            return jsonify({"status": "error", "message": "Missing file or user_id"}), 400
+
+        # ✅ Validate file extension
+        allowed_ext = {"pdf", "doc", "docx"}
+        filename = file.filename
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if ext not in allowed_ext:
+            return jsonify({"status": "error", "message": "Invalid file type. Only PDF/DOC/DOCX allowed."}), 400
+
+        # ✅ Prepare unique file name
+        safe_name = f"{user_id}_{filename.replace(' ', '_')}"
+        file_path = f"uploads/{safe_name}"
+
+        # ✅ Upload to Supabase Storage bucket "resumes"
+        res = supabase.storage.from_("resumes").upload(file_path, file)
+
+        # ⚠️ Check for upload errors
+        if hasattr(res, "error") and res.error is not None:
+            print("❌ Upload error:", res.error)
+            return jsonify({"status": "error", "message": "Upload failed"}), 500
+
+        # ✅ Get public URL
+        resume_url = supabase.storage.from_("resumes").get_public_url(file_path)
+        print(f"📎 Resume uploaded for user_id={user_id}: {resume_url}")
+
+        # ✅ Optionally save resume_url in database
+        supabase.table("job_applicants").update({"resume_url": resume_url}).eq("id", user_id).execute()
+
+        return jsonify({"status": "success", "resume_url": resume_url}), 200
+
+    except Exception as e:
+        print("❌ Error uploading resume:", e)
         print(traceback.format_exc())
         return jsonify({"status": "error", "message": str(e)}), 500
 
