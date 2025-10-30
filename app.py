@@ -2,14 +2,13 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from supabase import create_client, Client
 from docx import Document
-import fitz, os, uuid, requests
+import fitz, os, uuid, requests, traceback
 from dotenv import load_dotenv
 
 # -----------------------------
 # ⚙️ Load environment variables
 # -----------------------------
 load_dotenv()
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -21,62 +20,57 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = Flask(__name__)
 CORS(app)
 
-
 # -----------------------------
-# 🧩 Helper functions
-# -----------------------------
-def extract_text_from_pdf(path):
-    text = ""
-    with fitz.open(path) as pdf:
-        for page in pdf:
-            text += page.get_text()
-    return text
-
-
-def extract_text_from_docx(path):
-    doc = Document(path)
-    return "\n".join(p.text for p in doc.paragraphs)
-
-
-# -----------------------------
-# 🧾 Step 1: Save personal information
+# 🧾 STEP 1 – Save Personal Info
 # -----------------------------
 @app.route("/api/save_personal", methods=["POST"])
 def save_personal():
+    """Insert personal info and safely return user_id"""
     try:
-        data = request.get_json()
+        data = request.get_json(force=True)
         print("🧩 Received personal data:", data)
 
+        # Validation
+        required = ["full_name", "email", "phone", "city", "state", "country"]
+        missing = [f for f in required if not data.get(f)]
+        if missing:
+            msg = f"Missing fields: {', '.join(missing)}"
+            print("⚠️", msg)
+            return jsonify({"status": "error", "message": msg}), 400
+
+        # Insert + return inserted row
         result = supabase.table("job_applicants").insert({
-            "full_name": data.get("full_name"),
-            "email": data.get("email"),
-            "phone": data.get("phone"),
-            "city": data.get("city"),
-            "state": data.get("state"),
-            "country": data.get("country")
-        }).execute()
+            "full_name": data["full_name"],
+            "email": data["email"],
+            "phone": data["phone"],
+            "city": data["city"],
+            "state": data["state"],
+            "country": data["country"]
+        }).select("*").execute()
 
-        user_id = None
-        if result.data and len(result.data) > 0 and "id" in result.data[0]:
-            user_id = str(result.data[0]["id"])
-        else:
-            print("⚠️ Supabase did not return id:", result.data)
+        print("🧾 Supabase insert result:", result.data)
+        if not result.data or len(result.data) == 0:
+            return jsonify({"status": "error", "message": "Insert returned no data"}), 500
 
+        user_id = str(result.data[0].get("id"))
+        print(f"✅ Created user_id={user_id}")
         return jsonify({"status": "success", "user_id": user_id}), 200
+
     except Exception as e:
-        print("❌ Error saving personal info:", e)
+        print("❌ Exception in save_personal:", str(e))
+        print(traceback.format_exc())
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # -----------------------------
-# 💼 Step 2: Save job preferences
+# 💼 STEP 2 – Save Preferences
 # -----------------------------
 @app.route("/api/save_preferences", methods=["POST"])
 def save_preferences():
     try:
-        data = request.get_json()
+        data = request.get_json(force=True)
+        print("💼 Received preferences:", data)
         user_id = data.get("user_id")
-
         if not user_id:
             return jsonify({"status": "error", "message": "Missing user_id"}), 400
 
@@ -89,18 +83,17 @@ def save_preferences():
             "relocate": data.get("relocate", "off")
         }).eq("id", user_id).execute()
 
-        if not result.data:
-            print("⚠️ No record found for user_id", user_id)
-            return jsonify({"status": "error", "message": "User not found"}), 404
-
+        print("💾 Supabase update result:", result.data)
         return jsonify({"status": "success"}), 200
+
     except Exception as e:
         print("❌ Error saving preferences:", e)
+        print(traceback.format_exc())
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # -----------------------------
-# ✅ Step 3: Finalize submission
+# ✅ STEP 3 – Finalize
 # -----------------------------
 @app.route("/api/finalize", methods=["POST"])
 def finalize():
@@ -116,14 +109,12 @@ def finalize():
             "status": "completed"
         }).eq("id", user_id).execute()
 
-        if not result.data:
-            print("⚠️ No record found to finalize for id", user_id)
-            return jsonify({"status": "error", "message": "No record found"}), 404
+        print("✅ Finalized for user_id:", user_id)
+        return jsonify({"status": "success", "message": "Application finalized"}), 200
 
-        print(f"✅ Finalized successfully for user_id={user_id}")
-        return jsonify({"status": "success", "message": "Application finalized successfully!"}), 200
     except Exception as e:
-        print("❌ Error finalizing application:", str(e))
+        print("❌ Error finalizing:", str(e))
+        print(traceback.format_exc())
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
