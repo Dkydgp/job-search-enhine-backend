@@ -5,6 +5,27 @@ from werkzeug.utils import secure_filename
 from datetime import datetime, timezone
 from supabase import create_client, Client
 from flask_cors import CORS
+from io import BytesIO
+from pdfminer.high_level import extract_text
+from docx import Document
+
+def extract_resume_text(file_path: str) -> str:
+    """Extract readable text from PDF or DOCX resumes"""
+    try:
+        if file_path.lower().endswith(".pdf"):
+            # Extract text from PDF
+            text = extract_text(file_path)
+        elif file_path.lower().endswith(".docx"):
+            # Extract text from DOCX
+            doc = Document(file_path)
+            text = "\n".join(p.text for p in doc.paragraphs)
+        else:
+            text = "(Unsupported file type)"
+    except Exception as e:
+        print(f"⚠️ Error extracting text from {file_path}:", e)
+        text = "(Extraction failed)"
+    return text.strip()[:3000]  # limit to 3000 characters
+
 
 # ---------- Configuration ----------
 UPLOAD_DIR = "/tmp/resumes"
