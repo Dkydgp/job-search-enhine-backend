@@ -7,3 +7,4 @@ python-docx
 python-dotenv
 Flask>=2.0
 werkzeug>=2.0
+pdfminer.six
