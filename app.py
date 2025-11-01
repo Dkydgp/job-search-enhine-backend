@@ -9,6 +9,7 @@ from io import BytesIO
 from pdfminer.high_level import extract_text
 from docx import Document
 
+
 def extract_resume_text(file_path: str) -> str:
     """Extract readable text from PDF or DOCX resumes"""
     try:
@@ -47,15 +48,18 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+
 # ---------- Helper Functions ----------
 def allowed_file(filename: str) -> bool:
     """Check if uploaded file has an allowed extension"""
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
+
 def log_exception(e: Exception):
     """Log and print full exception trace"""
     print("❌ Exception:", str(e))
     traceback.print_exc()
+
 
 def upload_to_supabase_storage(file_path: str, filename: str) -> str:
     """Upload file to Supabase Storage and return public URL"""
@@ -81,6 +85,7 @@ def upload_to_supabase_storage(file_path: str, filename: str) -> str:
         log_exception(e)
         return None
 
+
 def insert_application(data: dict):
     """Insert a new job application record into Supabase"""
     try:
@@ -89,6 +94,7 @@ def insert_application(data: dict):
     except Exception as e:
         log_exception(e)
         raise
+
 
 # ---------- Routes ----------
 @app.route("/")
@@ -101,6 +107,7 @@ def home():
       <li><b>POST /api/upload_resume</b> → Submit job application</li>
     </ul>
     """
+
 
 @app.route("/health")
 def health():
@@ -157,6 +164,10 @@ def upload_resume():
         save_path = os.path.join(UPLOAD_DIR, filename)
         file.save(save_path)
 
+        # 🧠 Extract text from the resume (PDF or DOCX)
+        resume_text = extract_resume_text(save_path)
+        print(f"📄 Extracted {len(resume_text)} characters from resume.")
+
         # 6️⃣ Upload to Supabase Storage
         resume_url = upload_to_supabase_storage(save_path, filename)
         if not resume_url:
@@ -178,6 +189,7 @@ def upload_resume():
             "relocate": relocate,
             "resume_filename": filename,
             "resume_url": resume_url,
+            "resume_text": resume_text,  # ✅ NEW field added here
             "status": "Pending",
             "created_at": datetime.now(timezone.utc).isoformat()
         }
